@@ -1,0 +1,155 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Armando Schiano di Cola"
+date: "13 Novembre 2016"
+output: html_document
+---
+
+## Introduction
+***
+
+Nowadays, several wearable devices like Jawbone Up, Nike FuelBand, and Fitbit provide the possibility to obtain data about personal activity in a relatively inexpensive way. This data could then be used to make inference about the way the physical activities were performed.
+Given these premises, the goal of this project is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants who were asked to perform barbell lifts correctly and incorrectly in 5 different ways.
+
+More information about the data is available from the website here: http://groupware.les.inf.puc-rio.br/har 
+
+
+## Environment Set-Up 
+***
+
+As a first step, we will set up our environment and load the libraries
+
+```{r libraries}
+# clean up the environment
+rm(list=ls())
+
+# load libraries
+library(ggplot2)
+library(lattice)
+library(foreach)
+library(iterators)
+library(caret)
+library(RANN)
+library(parallel)
+library(doParallel)
+library(plyr)
+library(survival)
+library(gbm)
+```
+
+```{r seed}
+set.seed(1987)
+```
+
+## Getting data
+***
+
+Import the data
+
+```{r getting data}
+# get data
+trainUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+trainImport <- read.csv(url(trainUrl), na.strings=c("NA","#DIV/0!",""))
+testImport <- read.csv(url(testUrl), na.strings=c("NA","#DIV/0!",""))
+```
+
+## Preprocessing
+***
+
+Now, let's do some preprocessing of the data. In this phase we will partition the entire dataset into a training and a test set, with a proportion of 80/20
+
+```{r partitioning}
+# partition the data
+inTrain <- createDataPartition(trainImport$classe, 
+                               p=0.8, 
+                               list=FALSE
+                               )
+training <- trainImport[inTrain, ]
+testing <- trainImport[-inTrain, ]
+
+# remove useless variables (e.g. "user name")
+training <- training[-c(1:2)]
+```
+
+and then let's remove the variable we are trying to predict, namely the "classe" variable, from the training set
+
+```{r}
+trainImport <- subset(trainImport, select = -c(classe))
+```
+
+To improve the process of model fitting, we need to remove some variables that have near zero-variance or that have a lot of NAs. For the latter, we use a threshold of 80% of NAs for the predictors to be excluded.  
+
+```{r cleaning dataset}
+# remove near zero variance variables
+nzv_var <- nearZeroVar(training, saveMetrics=TRUE)
+
+training <- training[, nzv_var$nzv == FALSE]
+
+na_sums <- apply(training, 2, FUN = function(x) sum(is.na(x)))
+na_perc <- apply(training, 2, FUN = function(x) (sum(is.na(x)) / length(x)))
+
+# remove variables with more than 80% NAs 
+training <- training[ , !(names(training) %in% names(which(na_perc > 0.80)))]
+testing <- testing[ , !(names(testing) %in% names(which(na_perc > 0.80)))]
+```
+
+```{r cleaning memory}
+# clean memory to free up space
+gc(verbose = FALSE)
+rm(testImport, trainImport)
+```
+
+```{r configure parallel processing, echo=FALSE}
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+```
+
+## Model Fitting
+***
+
+By now we should have our dataset ready to put it into an algorithm of statistical learning. 
+
+Before that, we first use the function `trainControl` to compute parameters of resampling. In our case, we decide to do a 10-fold cross validation. This parameter will be inserted in our model
+
+```{r cross-validation}
+fitControl <- trainControl(method = "cv",
+                           number = 10,
+                           allowParallel = TRUE)
+```
+
+Then we finally choose the algorithm of statistical learning for our dataset. Since the predicted outcome is a factor variable, we can use a classification technique known as `Boosted Tree` model. The Boosted Tree model is a machine learning technique which creates a prediction model in the form of an "ensemble" of weak prediction models, typically decision trees. The Boosted tree model uses the same approach as a single tree, but sums up many weighted tree models over each boosting iteration.
+
+```{r generalized boosting}
+modelFitGbm <- train(classe ~ .,
+                     data = training,
+                     method = "gbm",
+                     trControl = fitControl,
+                     verbose = FALSE
+                     )
+```
+
+```{r stop cluster, echo=FALSE}
+stopCluster(cluster)
+```
+
+We can then predict the outcome on the testing set using our model and analyze the results
+
+```{r}
+pred_gbm <- predict(modelFitGbm,
+                    testing
+                    )
+
+confusionMatrix(pred_gbm,
+                testing$classe)
+```
+
+Finally, we have to estimate the "out of sample error" of our model. The out of sample error is the error that we get on a data set different from our training set. In our case it is the "testing" set.
+Out of sample errors could be estimated through a wide range of values, some of which are indicated in the "overall" section of the confusion matrix. For our purpose, we will use the `Accuracy` value, which is very high for our model (`r (confusionMatrix(pred_gbm, testing$classe)$overall[[1]])`). If we look further at the table we will see clearly that the prediction and the reference class almost overlap, as shown below:
+
+```{r}
+confusionMatrix(pred_gbm, testing$classe)$table
+```
+
+we can thus conclude that our model fits well on the dataset. 
